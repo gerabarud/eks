@@ -27,7 +27,7 @@ helm upgrade --install aws-load-balancer-controller eks-charts/aws-load-balancer
   --wait
 ```
 
-### Crear un Load Balancer
+### Load Balancer NLB - Instance mode
 
 El siguiente servicio va a crear un Network Load Balancer (NLB)
 
@@ -135,3 +135,144 @@ TARGET_GROUP_ARN=$(aws elbv2 describe-target-groups --load-balancer-arn $ALB_ARN
 
 aws elbv2 describe-target-health --target-group-arn $TARGET_GROUP_ARN
 ```
+
+### Load Balancer NLB - IP mode
+
+Como se mencionó anteriormente, el NLB que creamos opera en modo `instance`. Este modo admite pods que se ejecutan en instancias de AWS EC2. En este modo, AWS NLB envía tráfico a las instancias y, `kube-proxy` lo reenvía a los pods a través de uno o más nodos.
+
+En el modo IP, el NLB envía tráfico directamente a los pods de Kubernetes detrás del servicio, eliminando la necesidad de un salto de red adicional a través de los nodos de trabajo del clúster de Kubernetes. Esto significa que en lugar de registrar las instancias de EC2 en nuestro clúster EKS, el controlador del balanceador de carga ahora registra pods individuales y envía el tráfico directamente, aprovechando la CNI de AWS VPC y el hecho de que cada pod tiene una dirección IP de VPC de primera clase.  
+
+![alt text](image.png)
+
+Hay varias razones por las que podríamos querer configurar el NLB para que funcione en modo IP:
+
+- Crea una ruta de red más eficiente para las conexiones entrantes, sin pasar `kube-proxy` por el nodo de trabajo EC2
+- Elimina la necesidad de considerar aspectos como `externalTrafficPolicy`. 
+- Una aplicación se está ejecutando en Fargate en lugar de EC2
+
+### Ingress
+
+Ejemplo:
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ui
+  namespace: ui
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health/liveness
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ui
+                port:
+                  number: 80
+```
+
+📌 **¿Qué hacen estas anotaciones?**  
+
+| Anotación | Explicación |
+|------------|------------|
+| `alb.ingress.kubernetes.io/scheme: internet-facing` | El **ALB** será accesible desde Internet, asignándole una **IP pública**. Si quisieras que solo funcione dentro de la VPC, deberías cambiarlo a `internal`. |
+| `alb.ingress.kubernetes.io/target-type: ip` | El ALB enviará tráfico **directamente a las IPs de los pods** en Kubernetes. Si fuera `instance`, el tráfico se enviaría a los **nodos del clúster** en lugar de a los pods. |
+| `alb.ingress.kubernetes.io/healthcheck-path: /actuator/health/liveness` | Define la URL `/actuator/health/liveness` como la ruta que el ALB usará para verificar si los pods están activos y saludables. Si no responden, el ALB dejará de enviarles tráfico. |
+
+Inspeccionar en aws:
+```bash
+aws elbv2 describe-load-balancers --query 'LoadBalancers[?contains(LoadBalancerName, `k8s-ui-ui`) == `true`]'
+```
+
+Que nos dice la salida de este comando?
+
+- El  ALB es accesible en internet
+- Usa redes públicas de nuestro VPC
+
+Si queremos visualizar los target de este ingress:
+
+```bash
+ALB_ARN=$(aws elbv2 describe-load-balancers --query 'LoadBalancers[?contains(LoadBalancerName, `k8s-ui-ui`) == `true`].LoadBalancerArn' | jq -r '.[0]')
+
+TARGET_GROUP_ARN=$(aws elbv2 describe-target-groups --load-balancer-arn $ALB_ARN | jq -r '.TargetGroups[0].TargetGroupArn')
+
+aws elbv2 describe-target-health --target-group-arn $TARGET_GROUP_ARN
+```
+Qué nos dice la salida de este comando?
+
+Ya que usamos la annotation `b.ingress.kubernetes.io/target-type: ip`, el target es registrado usando la IP del pod donde queremos mandar el tráfico. 
+
+### Múltiple Ingress
+
+La función IngressGroup, que permite agrupar varios recursos de Ingress. El controlador fusionará automáticamente las reglas de Ingress para todos los Ingress dentro de IngressGroup y las gestionará con un único ALB. De esa manera, nos evitamos la creación de múltiples ALB. 
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ui-multi
+  namespace: ui
+  labels:
+    app.kubernetes.io/created-by: eks-workshop
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health/liveness
+    alb.ingress.kubernetes.io/group.name: retail-app-group
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ui
+                port:
+                  number: 80
+
+---
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: catalog-multi
+  namespace: catalog
+  labels:
+    app.kubernetes.io/created-by: eks-workshop
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/group.name: retail-app-group
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /catalogue
+            pathType: Prefix
+            backend:
+              service:
+                name: catalog
+                port:
+                  number: 80
+
+```
+
+Podemos ver que agrupa los Ingress en un único ALB por medio de la etiqueta `alb.ingress.kubernetes.io/group.name: retail-app-group`
+
+Detalles de los listeners del ALB:
+```bash
+ALB_ARN=$(aws elbv2 describe-load-balancers --query 'LoadBalancers[?contains(LoadBalancerName, `k8s-retailappgroup`) == `true`].LoadBalancerArn' | jq -r '.[0]')
+LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn $ALB_ARN | jq -r '.Listeners[0].ListenerArn')
+aws elbv2 describe-rules --listener-arn $LISTENER_ARN
+```
+
