@@ -18,8 +18,8 @@ Vamos a crear:
 - 1 Tabla de ruteo pública
 - 1 Tabla de ruteo privada
 
-![alt text](image.png)
-![alt text](image-1.png)
+![alt text](01-vpc.png)
+![alt text](02-tableroutes.png)
 
 ```bash
 terraform init
@@ -32,4 +32,8 @@ Vamos a crear:
 - eks cluster
 - nodos
 
-![alt text](image-2.png)
+![alt text](03-nodos.png)
+
+## IAMs permisos
+
+![alt text](04-iam.png)
