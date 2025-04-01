@@ -1,0 +1,31 @@
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: myapp
+  namespace: hpa
+spec:
+  # Definición del escalado
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: myapp
+  # Definición de Réplicas
+  minReplicas: 1
+  maxReplicas: 5
+  # Métricas de Autoescalado
+  metrics:
+    # Métrica 1: CPU - Si el uso promedio de CPU en los pods supera el 80%, se escala hacia arriba.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+    # Métrica 2: Memoria - Si el uso promedio de memoria en los pods supera el 70%, Kubernetes escalará hacia arriba.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 70
