@@ -249,6 +249,172 @@ Servicio de balanceo de carga de AWS que distribuye el tráfico entrante entre m
 
 1. Crear ALB con tf `15-aws-lbc.tf`
 
-## Ingress
+### Ejemplo con un service tipo NLB:
+
+**Se configura con las siguientes anotaciones:**
+
+```yaml
+# Supported annotations
+# https://kubernetes-sigs.github.io/aws-load-balancer-controller/v2.7/guide/service/annotations/
+# Example:
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+```
+
+**Aplicar**
+
+```bash
+k apply -f alb-service
+```
+
+**Chequear:**
+
+- Por CLI: `k get svc`
+
+- Por consola web: EC2 > Load balancers (se puede ver que es NLB)
+
+### ALB Ingress
+
+**Se configura con las siguientes anotaciones:**
+
+```yaml
+# Supported annotations
+# https://kubernetes-sigs.github.io/aws-load-balancer-controller/v2.7/guide/ingress/annotations/
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+```
+
+**Aplicar**
+
+```bash
+k apply -f alb-ingress
+```
+
+**Chequear:**
+
+- Por CLI: `k get ingress`
+
+- Por consola web: EC2 > Load balancers (se puede ver que es tipo Application)
+  - En los listeners podemos ver que uno en el puerto 80, y cuyo target group va directo a la IP del pod en el puerto 8080
+
+**Certificados:**
+
+Para perdir certificados, vamos a la consola web a: 
+
+1. Creación de Request:
+AWS Certificate Manager > Certificates > Request certificate > Request a public certificate 
+
+2. Una vez creado, tenemos que probar que somos dueños de ese dominio
+
+Entrar al certificate request creado y crear un CNAME record para el DNS en Route53:
+
+AWS Certificate Manager > Certificates > Certificate ID > Domain > Create records in Route 53
+
+Esperar a que status del certificate cambie a `Issued`
+
+Luego enrtar al certificado, copiar el ARN y agregarlo a las anotaciones del ingress ALB creado anteriormente:
+
+```yaml
+  annotations:
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-2:424432388155:certificate/7f32327d-ad95-4977-91c2-8fae85e9e598
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+```
+
+Aplicar y 
+
+> Estudiar cómo hacerlo sin Route53
+
+## NGINX Ingress
 
 ![alt text](ingress.png)
+
+1. Aplicar tf `16-nginx-ingress.tf`
+
+2. **Chequear:**
+
+- Por CLI: `k get ingress` y `k get svc`
+
+- Por consola web: EC2 > Load balancers (se puede ver que es tipo NLB)
+  - En los listeners podemos ver que uno en el puerto 80, y cuyo target group va directo a la IP del pod del ingress controller 
+
+3. Aplicar tf `17-cert-manager.tf`
+
+4. Creamos cluster issuer
+
+```bash
+k apply -f cluster-issuer
+```
+
+5. Ejemplo:
+
+```bash
+k apply -f nginx-ingress
+```
+
+6. Chequear
+
+```bash
+k get certificate
+k describe certificate
+k describe CertificateRequest
+k describe Order
+k describe Challenge
+```
+
+7. Crear CNAME record en el DNS, apuntando nuestro dominio al NLB del ingress
+
+## EBS
+
+Útil cuando creamos aplicaciones stateful. Solo puede atacharse a un pod (ReadWriteOnce)
+
+1. Aplicar tf `18-ebc-csi-driver.tf`
+
+2. Ejemplo statefull app
+
+```bash
+k apply -f ebs
+k get pvc
+```
+
+## EFS
+Este storage tiene las siguientes características:
+- **Es completamente elástico:** No hace falta especificar el tamaño del volumen, escala automáticamente cuando agregas o removes archivos
+- **ReadWriteMany mode:** Se pueden montar múltiples pods al volumen al mismo tiempo
+- **Es mucho mas caro que EFS**
+
+![alt text](efs.png)
+
+Para conectarnos, no podemos usar pod identity porque aún no lo soporta. La mejor forma es usando OpenID y linkearlo a un Service Account
+
+1. Aplicar `19-openid-connect-provider.tf`
+
+📌 Este Terraform configura un Proveedor de Identidad OIDC en AWS IAM para un clúster EKS.
+📌 Es un paso clave para habilitar IRSA (IAM Roles for Service Accounts) en Kubernetes.
+📌 Permite que los pods en EKS asuman roles IAM sin credenciales estáticas.
+
+2. Aplicar `20-efs.tf` (antes `terraform init` porque hay un nuevo provider)
+
+3. Ejemplo
+
+```bash
+k apply -f efs
+```
+
+4. Chequear
+
+```bash
+k get pods
+k get pvc
+```
+
+En consola web: EFS > Access Points
+
+## AWS Secret Manager
